@@ -1,53 +1,35 @@
+# from future import __annotations__
 import numpy as np
 from time import time
 from collections import OrderedDict
-from typing import List, Callable
+from typing import List, Tuple, Sequence, Callable, Any
 from argparse import ArgumentParser
 import tensorflow as tf
 from tensorflow import keras
-
-
-def _make_layer_func(base_layer_func, base_name: str):
-    """Return a function which can be used to create layers with unique names."""
-    i = -1
-    def layer_func(*args, **kwargs):
-        nonlocal i
-        i += 1
-        return base_layer_func(*args, name=f"{base_name}_{i}", **kwargs)
-    return layer_func
-
 
 N_FILTERS = 128
 PADDING = 'same'
 ACTIVATION = 'relu'
 
 # technically its 1D, so not 1x1, but I find 1x1 reminds me better what it's doing
-_CONV_1x1 = _make_layer_func(keras.layers.Conv1D, 'Conv_1x1')
-CONV_1x1 = lambda: _CONV_1x1(N_FILTERS, kernel_size=1, padding=PADDING, activation=ACTIVATION)
+CONV_1x1 = lambda: keras.layers.Conv1D(N_FILTERS, kernel_size=1, padding=PADDING, activation=ACTIVATION)
 
 # For the reduce block, we'll just set the stride of the operations used on the inputs to 2,
 # so each "op" here is actually a function that returns the desired layer
-_CONV_OPS = [
-    _make_layer_func(keras.layers.Conv1D, 'Conv3'),
-    _make_layer_func(keras.layers.Conv1D, 'Conv5'),
-    _make_layer_func(keras.layers.Conv1D, 'Conv7'),
-    _make_layer_func(keras.layers.Lambda, 'Id')
-]
-
 CONV_OPS = [
-    lambda s: _CONV_OPS[0](N_FILTERS, kernel_size=3, strides=s, padding=PADDING, activation=ACTIVATION),
-    lambda s: _CONV_OPS[1](N_FILTERS, kernel_size=5, strides=s, padding=PADDING, activation=ACTIVATION),
-    lambda s: _CONV_OPS[2](N_FILTERS, kernel_size=7, strides=s, padding=PADDING, activation=ACTIVATION),
-    lambda s: _CONV_OPS[3](lambda x: x),
+    lambda s: keras.layers.Conv1D(N_FILTERS, kernel_size=3, strides=s, padding=PADDING, activation=ACTIVATION),
+    lambda s: keras.layers.Conv1D(N_FILTERS, kernel_size=5, strides=s, padding=PADDING, activation=ACTIVATION),
+    lambda s: keras.layers.Conv1D(N_FILTERS, kernel_size=7, strides=s, padding=PADDING, activation=ACTIVATION),
     lambda s: keras.layers.MaxPool1D(strides=s, padding='same'),
-    lambda s: keras.layers.AvgPool1D(strides=s, padding='same')
+    lambda s: keras.layers.AvgPool1D(strides=s, padding='same'),
+    # Id *must* be the last op; we make sure not to use the last op in the input when reducing
+    lambda s: keras.layers.Lambda(lambda x: x)
 ]
 
 COMBINATION_METHODS = {
-    'add': _make_layer_func(lambda name: keras.layers.Lambda(lambda x: tf.reduce_sum(x, axis=0), name=name), 'Add'),
-    'mult': _make_layer_func(lambda name: keras.layers.Lambda(lambda x: tf.reduce_prod(x, axis=0), name=name), 'Mult')
+    'add': lambda: keras.layers.Lambda(lambda x: tf.reduce_sum(x, axis=0)),
+    'mult': lambda: keras.layers.Lambda(lambda x: tf.reduce_prod(x, axis=0))
 }
-
 
 
 class Node:
@@ -57,18 +39,104 @@ class Node:
        self.combination_method = combination_method
 
 
-class Block(keras.layers.Layer):
-    def __init__(self):
-        super().__init__()
+class Block:
+    def __init__(self,
+                 n_ops_per_node: int,
+                 n_nodes: int,
+                 node_input_idx: List[List[int]],
+                 node_op_idx: List[List[int]],
+                 node_combination_methods: List[str],
+                 stride: int
+                 ):
+        self.n_ops_per_node = n_ops_per_node
+        self.n_nodes = n_nodes
+        self.node_input_idx = node_input_idx
+        self.node_op_idx = node_op_idx
+        self.node_combination_methods = node_combination_methods
+        self.stride = stride
 
-    def build(self, input_shape):
-        super().build(input_shape)
+    @classmethod
+    def sample_block(cls, n_ops_per_node: int, n_nodes: int, combination_methods: List[str], stride: int=1):  # -> Block
+        """Randomly sample connections and ops for a `Block`, which is returned"""
+        node_op_idx = []
+        node_input_idx = []
+        node_combination_methods = []
 
-    def call(self, inputs):
-        return inputs
+        inputs = [0, 1]
+        conv_op_idx = list(range(len(CONV_OPS)))
 
-    def compute_output_shape(self, input_shape):
-        return input_shape
+        for i in range(n_nodes):
+            input_idx = np.random.choice(inputs, size=n_ops_per_node, replace=True)
+            # sort so that we don't have different weight matrices for the same thing like
+            # node1/inp1_op1_inp2_op2 and node1/inp2_op2_inp1_op1
+            node_input_idx.append(sorted(input_idx))
+
+            node_combination_methods.append(np.random.choice(combination_methods))
+
+            if stride == 1:
+                op_idx = np.random.choice(conv_op_idx, size=n_ops_per_node, replace=True)
+            else:  # this is a reduce block
+                op_idx = []
+                for input_i in input_idx:
+                    op = np.random.choice(conv_op_idx)
+
+                    # the first two inputs are the ones that need to be strided on
+                    # so we can't use an id op, which won't reduce
+                    if input_i in [0, 1]:
+                        while op == len(CONV_OPS) - 1:  # Id is the last CONV_OP
+                            op = np.random.choice(conv_op_idx)
+
+                    op_idx.append(op)
+
+            node_op_idx.append(op_idx)
+
+        return cls(n_ops_per_node, n_nodes, node_input_idx, node_op_idx, node_combination_methods, stride)
+
+    def _build_node(self, inputs, unused_outputs: set, node_idx: int):
+        node_ops = self.node_op_idx[node_idx]
+        node_inputs = [inputs[idx] for idx in self.node_input_idx[node_idx]]
+        combination_method = self.node_combination_methods[node_idx]
+
+        unused_outputs.difference_update(node_inputs)
+
+        outputs = []
+        for i in range(len(node_inputs)):
+            input_ = node_inputs[i]
+
+            # only use strided operations on the original inputs so there's only one reduction
+            if input_.shape[1].value != inputs[0].shape[1].value:
+                op = CONV_OPS[node_ops[i]](1)
+            else:
+                op = CONV_OPS[node_ops[i]](self.stride)
+
+            if input_.shape[-1] != N_FILTERS and ('Pool' in str(type(op)) or node_ops[i] == len(CONV_OPS) - 1):
+                input_ = self._input_conv_1x1
+
+            # we allow for a node to use the same op on the same input each time; the op
+            # will be parametrized differently for each one.
+            with tf.variable_scope(f'inp_{i}_{self.node_input_idx[node_idx][i]}'):
+                with tf.variable_scope(f'op_{node_ops[i]}'):
+                    outputs.append(op(input_))
+
+        return COMBINATION_METHODS[combination_method]()(outputs)
+
+    def _build_block(self, inputs):
+        unused_outputs = set()
+        for i in range(self.n_nodes):
+            with tf.variable_scope(f'node_{i}'):
+                output = self._build_node(inputs, unused_outputs, node_idx=i)
+            inputs.append(output)
+            unused_outputs.add(output)
+
+        unused_outputs = list(unused_outputs)
+        if len(unused_outputs) > 1:
+            return CONV_1x1()(keras.layers.concatenate(unused_outputs, axis=-1))
+        else:
+            return unused_outputs[0]
+
+    def __call__(self, inputs, input_conv_1x1):
+        self._input_conv_1x1 = input_conv_1x1
+        return self._build_block(inputs)
 
 
 class ArchitectureSampler:
@@ -83,86 +151,39 @@ class ArchitectureSampler:
         self.n_nodes_per_block = n_nodes_per_block
         self.n_block_repeats = n_block_repeats
         self.n_blocks_between_reduce = n_blocks_between_reduce
-        self.combination_methods = [COMBINATION_METHODS[m] for m in combination_methods]
-
-    def _sample_node(self, all_inputs, unused_outputs: set, stride: int=1):
-        inputs = np.random.choice(all_inputs, size=self.n_ops_per_node, replace=True)
-        combination_method = np.random.choice(self.combination_methods)
-        ops = np.random.choice(CONV_OPS, size=self.n_ops_per_node, replace=True)
-
-        unused_outputs.difference_update(inputs)
-
-        outputs = []
-        for i in range(len(inputs)):
-            input_ = inputs[i]
-
-            # only use strided operations on the original inputs so there's only one reduction
-            if input_.shape[1] != all_inputs[0].shape[1]:
-                op = ops[i](1)
-            else:
-                op = ops[i](stride)
-
-                # don't allow Id op to be used on the original input; that needs to be reduced
-                while 'Id' in op.name:
-                    op = np.random.choice(CONV_OPS)(stride)
-
-            if input_.shape[-1] != N_FILTERS and 'Pool' in str(type(op)):
-                input_ = self._input_conv_1x1
-
-            outputs.append(op(input_))
-
-        return combination_method()(outputs)
-
-    def _sample_block(self, inputs, seed: int, stride: int=1):
-        np.random.seed(seed)
-        unused_outputs = set()
-        for i in range(self.n_nodes_per_block):
-            with tf.variable_scope(f'node_{i}'):
-                output = self._sample_node(inputs, unused_outputs, stride=stride)
-            inputs.append(output)
-            unused_outputs.add(output)
-
-        unused_outputs = list(unused_outputs)
-        if len(unused_outputs) > 1:
-            return CONV_1x1()(keras.layers.concatenate(unused_outputs, axis=-1))
-        else:
-            return unused_outputs[0]
-
-    def sample_block(self) -> Callable:
-        seed = np.random.randint(1_000_000)
-        return lambda inputs: self._sample_block(inputs, seed)
-
-    def sample_reduce_block(self) -> Callable:
-        seed = np.random.randint(1_000_000)
-        return lambda inputs: self._sample_block(inputs, seed, stride=2)
+        self.combination_methods = combination_methods
 
     def sample_arch(self, input_shape, n_arches: int=1) -> List:
         arches = []
         for _ in range(n_arches):
-            input_ = keras.layers.Input(input_shape)
+            with tf.variable_scope('input'):
+                input_ = keras.layers.Input(input_shape)
+                input_conv_1x1 = CONV_1x1()(input_)
+
             # use the input twice because later layers will have the two previous
             # layers' outputs as possible inputs (except after a reduction)
             inputs = [input_, input_]
-            self._input_conv_1x1 = CONV_1x1()(input_)
 
-            block = self.sample_block()
-            reduce_block = self.sample_reduce_block()
+            # block = self.sample_block()
+            # reduce_block = self.sample_reduce_block()
+            block = Block.sample_block(self.n_ops_per_node, self.n_nodes_per_block, self.combination_methods)
+            reduce_block = Block.sample_block(self.n_ops_per_node, self.n_nodes_per_block, self.combination_methods, stride=2)
 
             # you can also select the input of the last block as input to a node
             # in the next block (as long as there was no reduce in between)
             last_block_input = input_
-            for i in range(self.n_block_repeats):
-                with tf.variable_scope(f'repeat_{i}'):
-                    for j in range(self.n_blocks_between_reduce):
-                        with tf.variable_scope(f'block_{j}'):
-                            block_output = block(inputs)
+            for repeat_idx in range(self.n_block_repeats):
+                with tf.variable_scope(f'repeat_{repeat_idx}'):
+                    for block_idx in range(self.n_blocks_between_reduce):
+                        with tf.variable_scope(f'block_{block_idx}'):
+                            block_output = block(inputs, input_conv_1x1)
                         inputs = [last_block_input, block_output]
                         last_block_input = block_output
 
                     # don't add a reduction block just before the output layer
-                    if i != self.n_block_repeats - 1:
+                    if repeat_idx != self.n_block_repeats - 1:
                         with tf.variable_scope(f'reduce'):
-                            block_output = reduce_block(inputs)
+                            block_output = reduce_block(inputs, input_conv_1x1)
                         inputs = [block_output, block_output]
                         last_block_input = block_output
 
@@ -170,7 +191,7 @@ class ArchitectureSampler:
                 output = keras.layers.Flatten()(block_output)
                 output = keras.layers.Dense(1)(output)
 
-            arches.append(Model(keras.models.Model(input_, output)))
+            arches.append(Model(keras.models.Model(input_, output), block, reduce_block))
         return arches
 
 
@@ -186,7 +207,7 @@ class WeightsLoader:
         self._load_weights_from_disk()
 
     def _load_weights_from_disk(self):
-        self.weights = dict(np.load(self.weights_fname))
+        self.weights = dict(np.load(self.weights_file))
 
     def save_weights_to_disk(self):
         np.savez_compressed(self.weights_file, **self.weights)
@@ -214,13 +235,15 @@ class WeightsLoader:
 
 
 class Model:
-    def __init__(self, keras_model: keras.models.Model):
-        self.model = keras_model
+    def __init__(self, keras_model: keras.models.Model, block: Block, reduce_block: Block):
+        self.keras_model = keras_model
+        self.block = block
+        self.reduce_block = reduce_block
         self._fitness = None
 
     def train(self):
-        self.model.compile()
-        self.model.fit()
+        self.keras_model.compile()
+        self.keras_model.fit()
 
         self._fitness = 0
         self.trained_at = time()
@@ -236,9 +259,16 @@ class Model:
         return time() - self.trained_at
 
     def make_child(self):
-        child = Model(self.arch)
-        child.train()
-        return child
+        block = self.block
+        reduce_block = self.reduce_block
+        if np.random.randint(2):
+            block = block.mutate()
+        else:
+            reduce_block = reduce_block.mutate()
+        # give arch sampler a function to return an arch made from a given set of blocks
+        # child = Model(self.arch)
+        # child.train()
+        return self
 
 
 if __name__ == "__main__":
