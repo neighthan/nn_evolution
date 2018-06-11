@@ -6,6 +6,7 @@ from typing import List, Tuple, Sequence, Callable, Any
 from argparse import ArgumentParser
 import tensorflow as tf
 from tensorflow import keras
+from evo.utils import check_blocks
 
 N_FILTERS = 128
 PADDING = 'same'
@@ -191,7 +192,9 @@ class ArchitectureSampler:
                 output = keras.layers.Flatten()(block_output)
                 output = keras.layers.Dense(1)(output)
 
-            arches.append(Model(keras.models.Model(input_, output), block, reduce_block))
+            model = keras.models.Model(input_, output)
+            check_blocks([w.name for w in model.trainable_weights], self.n_ops_per_node)
+            arches.append(Model(model, block, reduce_block))
         return arches
 
 
@@ -203,11 +206,15 @@ class WeightsLoader:
         """
         :param weights_file: should end in .npz
         """
+        assert weights_file.endswith('.npz')
         self.weights_file = weights_file
         self._load_weights_from_disk()
 
     def _load_weights_from_disk(self):
-        self.weights = dict(np.load(self.weights_file))
+        try:
+            self.weights = dict(np.load(self.weights_file))
+        except FileNotFoundError:
+            self.weights = {}
 
     def save_weights_to_disk(self):
         np.savez_compressed(self.weights_file, **self.weights)
