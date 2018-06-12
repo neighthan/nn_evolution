@@ -199,9 +199,6 @@ class ArchitectureSampler:
 
 
 class WeightsLoader:
-    # TODO: do we need to process the names at all?
-    # yes... because each block will have something like 'repeat_0/block_0/node_0/Conv5_0/kernel:0'
-    # we just want to know node_0/op/input/[kernel or bias]
     def __init__(self, weights_file: str):
         """
         :param weights_file: should end in .npz
@@ -232,7 +229,7 @@ class WeightsLoader:
         model.set_weights(list(weights.values()))
 
     def save_weights(self, model: tf.keras.models.Model):
-        """Update in-memory weights from `model`."""
+        """Update in-memory and on-disk weights from `model`."""
         weights = model.get_weights()
         weights = {model.trainable_weights[i].name: weights[i] for i in range(len(weights))}
 
@@ -248,12 +245,13 @@ class Model:
         self.reduce_block = reduce_block
         self._fitness = None
 
-    def train(self, train_inputs, train_labels, test_inputs, test_labels, loss: str='mse', optimizer: str='adam', **train_kwargs):
+    def train(self, train_inputs, train_labels, test_inputs, test_labels, loss: str='mse', optimizer: str='adam',
+              verbose: int=0, batch_size: int=128, **train_kwargs):
         """Fitness will be determined as the negative loss on `test_inputs` and `test_labels`."""
         self.keras_model.compile(optimizer, loss)
-        self.keras_model.fit(train_inputs, train_labels, verbose=0, **train_kwargs)
+        self.keras_model.fit(train_inputs, train_labels, verbose=verbose, batch_size=batch_size, **train_kwargs)
 
-        self._fitness = -self.keras_model.evaluate(test_inputs, test_labels)
+        self._fitness = -self.keras_model.evaluate(test_inputs, test_labels, verbose=verbose)
         self.trained_at = time()
 
     @property
@@ -264,7 +262,10 @@ class Model:
 
     @property
     def age(self):
-        return time() - self.trained_at
+        if hasattr(self, 'trained_at'):
+            return time() - self.trained_at
+        else:
+            assert False, "Train the model first so it has an age."
 
     def make_child(self):
         block = self.block
@@ -274,6 +275,8 @@ class Model:
         else:
             reduce_block = reduce_block.mutate()
         # give arch sampler a function to return an arch made from a given set of blocks
+        # (change it to use this when sampling new arches too; there the blocks themselves
+        # will also be sampled first instead of passed in)
         # child = Model(self.arch)
         # child.train()
         return self
