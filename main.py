@@ -216,7 +216,7 @@ class WeightsLoader:
         except FileNotFoundError:
             self.weights = {}
 
-    def save_weights_to_disk(self):
+    def _save_weights_to_disk(self):
         np.savez_compressed(self.weights_file, **self.weights)
 
     def load_weights(self, model: tf.keras.models.Model):
@@ -237,8 +237,8 @@ class WeightsLoader:
         weights = {model.trainable_weights[i].name: weights[i] for i in range(len(weights))}
 
         for weight_name in weights:
-            if weight_name in self.weights:
-                self.weights[weight_name] = weights[weight_name]
+            self.weights[weight_name] = weights[weight_name]
+        self._save_weights_to_disk()
 
 
 class Model:
@@ -248,17 +248,18 @@ class Model:
         self.reduce_block = reduce_block
         self._fitness = None
 
-    def train(self):
-        self.keras_model.compile()
-        self.keras_model.fit()
+    def train(self, train_inputs, train_labels, test_inputs, test_labels, loss: str='mse', optimizer: str='adam', **train_kwargs):
+        """Fitness will be determined as the negative loss on `test_inputs` and `test_labels`."""
+        self.keras_model.compile(optimizer, loss)
+        self.keras_model.fit(train_inputs, train_labels, verbose=0, **train_kwargs)
 
-        self._fitness = 0
+        self._fitness = -self.keras_model.evaluate(test_inputs, test_labels)
         self.trained_at = time()
 
     @property
     def fitness(self):
         if self._fitness is None:
-            self.train()
+            assert False, "Train the model first to determine its fitness."
         return self._fitness
 
     @property
