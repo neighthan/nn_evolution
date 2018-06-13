@@ -1,9 +1,17 @@
 # from future import __annotations__
 from argparse import ArgumentParser
+from comet_ml import Experiment
+import pickle
+import os
+from tqdm import tqdm
 import numpy as np
 import tensorflow as tf
 from tf_layers.tf_utils import tf_init
-from evo.main import ArchitectureSampler
+from nn_evolution.architecture import ArchitectureSampler, WeightsLoader
+from nn_evolution.utils import save_arches, load_arches
+from antibody_design.src.utils import load_seqs, make_splits, encode
+import logging
+
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -21,37 +29,103 @@ if __name__ == "__main__":
     parser.add_argument('-ns', '--n_sample', type=int, help='Number of models in a sample.', required=True)
     parser.add_argument('-ng', '--n_generations', type=int, required=True)
     parser.add_argument('-p', '--experiment_path', help='Location to save all experiment data.', required=True)
-    parser.add_argument('-ip', '--input_shape', type=int, n_args='+', required=True)
     parser.add_argument('-v', '--verbose', action='store_true')
 
     args = parser.parse_args()
     regularized_evolution = True  # remove oldest arch from sample instead of worst
+    n_train_epochs = 3
+
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
+
+    try:
+        os.mkdir(args.experiment_path)
+    except FileExistsError:
+        pass
+
+    try:
+        with open(f"{os.environ['HOME']}/.comet_key") as f:
+            comet_key = f.read().strip()
+        exp = Experiment(comet_key, project_name='evo', log_graph=False, auto_metric_logging=False)
+    except FileNotFoundError:
+        exp = None
+
+    # TODO: make data loading more modular...
+    tasks = ['J3/J2']
+    seqs = load_seqs(tasks)
+    splits = make_splits(seqs.index, seqs[tasks], test_frac=0.1, val_frac=0.1, by_value=False)
+
+    max_seq_len = seqs.index.str.len().max()
+    for split in splits.keys():
+        if len(splits[split].inputs):
+            splits[split].inputs = encode(splits[split].inputs.str.pad(max_seq_len, side='right', fillchar='J'))
+    input_shape = splits.train.inputs.shape[1:]
 
     # set up the initial population
-    arch_sampler = ArchitectureSampler(input_shape=args.input_shape, **dict(args))
+    arch_sampler = ArchitectureSampler(input_shape=input_shape, **vars(args))
+
+    # load existing arches first
+    try:
+        all_trained_arches = load_arches(f"{args.experiment_path}/all_arches.pkl")
+
+        logging.info(f"Loaded {len(all_trained_arches)} arches.")
+
+        # keep the proper population size at most
+        if regularized_evolution:  # the most recent ones were the population when saved
+            arches = all_trained_arches[-args.n_arches:]
+        else:
+            # need to sort by fitness then select the most fit n_arches
+            raise NotImplementedError
+    except FileNotFoundError:
+        arches = []
+        all_trained_arches = []
+
+    arches.extend(arch_sampler.sample_arches(args.n_arches - len(arches)))
+
+    weights_file = f'{args.experiment_path}/weights.npz'
+    weights_loader = WeightsLoader(weights_file)
 
     config = tf_init()
-    sess = tf.Session(config=config)
 
-    with sess.as_default():
-        models = arch_sampler.sample_arch(args.input_shape)
+    logging.info(f"Training initial population ({args.n_arches} arches).")
 
-    for generation in range(args.n_generations):
+    for i in tqdm(range(len(arches))):
+        arch = arches[i]
+        arch.train(splits.train.inputs, splits.train.labels, splits.val.inputs, splits.val.labels,
+                   weights_loader=weights_loader, sess_config=config, epochs=n_train_epochs)
+        if exp:
+            exp.log_metric('fitness', arch.fitness, step=-i - 1)
+        all_trained_arches.append(arch)
+        save_arches(all_trained_arches, f'{args.experiment_path}/all_arches.pkl')
+
+    logging.info(f"Finished initial population. Mutating for {args.n_generations} generations.")
+
+    for generation in tqdm(range(args.n_generations)):
         # select a random sample from the population; mutate the best, remove the oldest or worse
-        sample_models = np.random.choice(models, size=args.n_sample, replace=False)
-        best_model = max(sample_models, key=lambda model: model.fitness)
-        new_model = best_model.make_child()
-        models.append(new_model)
+        sample_arches = np.random.choice(arches, size=args.n_sample, replace=False)
+        best_arch = max(sample_arches, key=lambda arch: arch.fitness)
+        new_arch = best_arch.make_child(arch_sampler)
+        new_arch.train(splits.train.inputs, splits.train.labels, splits.val.inputs, splits.val.labels,
+                       weights_loader=weights_loader, sess_config=config, epochs=n_train_epochs)
+        arches.append(new_arch)
+        all_trained_arches.append(new_arch)
+        save_arches(all_trained_arches, f'{args.experiment_path}/all_arches.pkl')
+
+        if exp:
+            exp.log_metric('fitness', new_arch.fitness, step=generation)
 
         if regularized_evolution:
-            worst = max(sample_models, key=lambda model: model.age)
+            worst = max(sample_arches, key=lambda arch: arch.age)
         else:
-            worst = min(sample_models, key=lambda model: model.fitness)
+            worst = min(sample_arches, key=lambda arch: arch.fitness)
 
-        models.remove(worst)
+        arches.remove(worst)
 
-        if args.verbose:
-            mean_fitness = sum(m.fitness for m in models) / len(models)
-            print(f'Generation {generation}: Removed model with fitness = {worst.fitness}, '
-                  f'added model with fitness = {new_model.fitness} (mean fitness = {mean_fitness}).')
-            # exp.log..('mean_fitness', mean_fitness)
+        mean_fitness = sum(m.fitness for m in arches) / len(arches)
+        logging.info(f'Generation {generation}: Removed arch with fitness = {worst.fitness}, '
+                     f'added arch with fitness = {new_arch.fitness} (mean fitness = {mean_fitness}).')
+
+        if exp:
+            exp.log_metric('mean_fitness', mean_fitness, step=generation)
+
+    with open(f'{args.experiment_path}/best_arch.pkl', 'wb') as f:
+        pickle.dump(max(arches, key=lambda arch: arch.fitness).serialize(), f)
