@@ -11,6 +11,7 @@ from tensorflow import keras
 from nn_evolution.utils import check_blocks
 from tf_layers.tf_utils import tf_init
 import logging
+import inspect
 
 N_FILTERS = 128
 PADDING = 'same'
@@ -267,6 +268,7 @@ class WeightsLoader:
         # override random weights with the pre-trained ones
         for weight_name in weights:
             if weight_name in self.weights:
+                assert weights[weight_name].shape == self.weights[weight_name].shape, f"{weights[weight_name].shape}, {self.weights[weight_name].shape}"
                 weights[weight_name] = self.weights[weight_name]
 
         model.set_weights(list(weights.values()))
@@ -330,7 +332,7 @@ class Architecture:
                 weights_loader.save_weights(model)
 
             # self._fitness = -model.evaluate(test_inputs, test_labels, verbose=verbose)
-            predictions = model.predict(test_inputs)
+            predictions = model.predict(test_inputs, verbose=verbose)
             self._fitness = pearsonr(np.squeeze(predictions), np.squeeze(test_labels))[0]
 
             # tf.keras.utils.plot_model(model, to_file='test.png')
@@ -400,31 +402,23 @@ class Architecture:
 
     def serialize(self, fname: str=''):
         """
+        Write `self` to the file at `fname` or return a string version.
+
+        Because of the different threads used when training the models, I wasn't
+        able to just `pickle.dump` the arches, so this method is a workaround.
+
         :param fname: if '', dumps to string instead and returns.
         """
+
+        arch_args = list(inspect.signature(Architecture).parameters.keys())
+        block_args = list(inspect.signature(Block).parameters.keys())
+        arch_args.remove('block')
+        arch_args.remove('reduce_block')
+
         data = {
-            'block': {
-                'n_ops_per_node': self.block.n_ops_per_node,
-                'n_nodes': self.block.n_nodes,
-                'node_input_idx': self.block.node_input_idx,
-                'node_op_idx': self.block.node_op_idx,
-                'node_combination_methods': self.block.node_combination_methods,
-                'stride': self.block.stride
-            },
-            'reduce_block': {
-                'n_ops_per_node': self.reduce_block.n_ops_per_node,
-                'n_nodes': self.reduce_block.n_nodes,
-                'node_input_idx': self.reduce_block.node_input_idx,
-                'node_op_idx': self.reduce_block.node_op_idx,
-                'node_combination_methods': self.reduce_block.node_combination_methods,
-                'stride': self.reduce_block.stride
-            },
-            'input_shape': self.input_shape,
-            'n_block_repeats': self.n_block_repeats,
-            'n_blocks_between_reduce': self.n_blocks_between_reduce,
-            'n_ops_per_node': self.n_ops_per_node,
-            '_fitness': self._fitness,
-            '_trained_at': self._trained_at
+            'block': {arg: getattr(self.block, arg) for arg in block_args},
+            'reduce_block': {arg: getattr(self.reduce_block, arg) for arg in block_args},
+            **{arg: getattr(self, arg) for arg in arch_args}
         }
 
         if fname:

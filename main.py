@@ -90,12 +90,13 @@ if __name__ == "__main__":
 
     for i in tqdm(range(len(arches))):
         arch = arches[i]
-        arch.train(splits.train.inputs, splits.train.labels, splits.val.inputs, splits.val.labels,
-                   weights_loader=weights_loader, sess_config=config, epochs=n_train_epochs)
-        if exp:
-            exp.log_metric('fitness', arch.fitness, step=-i - 1)
-        all_trained_arches.append(arch)
-        save_arches(all_trained_arches, f'{args.experiment_path}/all_arches.pkl')
+        if arch._fitness is None:
+            arch.train(splits.train.inputs, splits.train.labels, splits.val.inputs, splits.val.labels,
+                    weights_loader=weights_loader, sess_config=config, epochs=n_train_epochs)
+            if exp:
+                exp.log_metric('fitness', arch.fitness, step=-i - 1)
+            all_trained_arches.append(arch)
+            save_arches(all_trained_arches, f'{args.experiment_path}/all_arches.pkl')
 
     logging.info(f"Finished initial population. Mutating for {args.n_generations} generations.")
 
@@ -106,6 +107,14 @@ if __name__ == "__main__":
         new_arch = best_arch.make_child(arch_sampler)
         new_arch.train(splits.train.inputs, splits.train.labels, splits.val.inputs, splits.val.labels,
                        weights_loader=weights_loader, sess_config=config, epochs=n_train_epochs)
+
+        # the error happens in another thread, so we need to do something in the main thread too
+        if new_arch._fitness is None:
+            err_arch_fname = f'{args.experiment_path}/err_arch.pkl'
+            with open(err_arch_fname, 'wb') as f:
+                pickle.dump(new_arch.serialize(), f)
+            assert False, f"Error training model! Arch saved to {err_arch_fname}."
+
         arches.append(new_arch)
         all_trained_arches.append(new_arch)
         save_arches(all_trained_arches, f'{args.experiment_path}/all_arches.pkl')

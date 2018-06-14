@@ -8,7 +8,7 @@ n_arches="2"
 n_sample="2"
 n_generations="2"
 experiment_path="/cluster/nhunt/evo_test"
-verbose="--verbose" # --verbose if you want this; it's a flag
+verbose="" # --verbose if you want this; it's a flag
 
 script_dir="$(dirname "$(realpath "$0")")"
 

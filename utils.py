@@ -67,5 +67,6 @@ def save_arches(arches: list, fname: str) -> None:
 def load_arches(fname: str) -> list:
     with open(fname, 'rb') as f:
         arches = pickle.load(f)
+    arches = [pickle.loads(arch) for arch in arches]
     arches = [nn_evolution.architecture.Architecture.deserialize(arch) for arch in arches]
     return arches
