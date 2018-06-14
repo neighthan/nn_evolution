@@ -5,6 +5,7 @@ from time import time
 import pickle
 from collections import OrderedDict
 from threading import Thread
+import re
 from typing import Optional, List, Tuple, Sequence, Callable, Any
 import tensorflow as tf
 from tensorflow import keras
@@ -266,9 +267,13 @@ class WeightsLoader:
         weights = OrderedDict((model.trainable_weights[i].name, weights[i]) for i in range(len(weights)))
 
         # override random weights with the pre-trained ones
+        # because the number of leaf outputs in a block can change with mutation, the size of the
+        # weight matrix of the conv 1x1 on the block's output can change. We don't have a good way
+        # to account for and share a weight matrix for this (yet?), so ignore such weights
+        conv_1x1 = re.compile('repeat_\d+/block_\d+/conv')
         for weight_name in weights:
-            if weight_name in self.weights:
-                assert weights[weight_name].shape == self.weights[weight_name].shape, f"{weights[weight_name].shape}, {self.weights[weight_name].shape}"
+            if weight_name in self.weights and not re.match(conv_1x1, weight_name):
+                assert weights[weight_name].shape == self.weights[weight_name].shape, f"{weights[weight_name].shape}, {self.weights[weight_name].shape} ({weight_name})"
                 weights[weight_name] = self.weights[weight_name]
 
         model.set_weights(list(weights.values()))
