@@ -270,7 +270,7 @@ class WeightsLoader:
         # because the number of leaf outputs in a block can change with mutation, the size of the
         # weight matrix of the conv 1x1 on the block's output can change. We don't have a good way
         # to account for and share a weight matrix for this (yet?), so ignore such weights
-        conv_1x1 = re.compile('repeat_\d+/block_\d+/conv')
+        conv_1x1 = re.compile('repeat_\d+/(block_\d+|reduce)/conv')
         for weight_name in weights:
             if weight_name in self.weights and not re.match(conv_1x1, weight_name):
                 assert weights[weight_name].shape == self.weights[weight_name].shape, f"{weights[weight_name].shape}, {self.weights[weight_name].shape} ({weight_name})"
