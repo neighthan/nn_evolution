@@ -109,7 +109,7 @@ if __name__ == "__main__":
 
             all_trained_arches.append(arch)
             save_arches(all_trained_arches, f'{args.experiment_path}/all_arches.pkl')
-            logging.info(f"Trained initial arch {i}.")
+            logging.info(f"Trained initial arch {i} (fitness = {arch.fitness:.3f}).")
 
     logging.info(f"Finished initial population. Mutating for {args.n_generations} generations.")
 
