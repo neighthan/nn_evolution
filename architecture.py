@@ -12,6 +12,7 @@ from tensorflow import keras
 from nn_evolution.utils import check_blocks
 from tf_layers.tf_utils import tf_init
 import logging
+from termcolor import colored
 import inspect
 
 N_FILTERS = 128
@@ -119,10 +120,8 @@ class Block:
             input_ = node_inputs[i]
 
             # only use strided operations on the original inputs so there's only one reduction
-            if input_.shape[1].value != inputs[0].shape[1].value:
-                op = CONV_OPS[node_ops[i]](1)
-            else:
-                op = CONV_OPS[node_ops[i]](self.stride)
+            stride = 1 if input_.shape[1].value != inputs[0].shape[1].value else self.stride
+            op = CONV_OPS[node_ops[i]](stride)
 
             if input_.shape[-1] != N_FILTERS and ('Pool' in str(type(op)) or node_ops[i] == len(CONV_OPS) - 1):
                 input_ = self._input_conv_1x1
@@ -131,8 +130,12 @@ class Block:
             # will be parametrized differently for each one.
             with tf.variable_scope(f'inp_{i}_{self.node_input_idx[node_idx][i]}'):
                 with tf.variable_scope(f'op_{node_ops[i]}'):
-                    logging.debug(f"\t\tinp_{i}")
-                    outputs.append(op(input_))
+                    output = op(input_)
+
+                    logging.debug(colored(f'\t\tinp_{i}', 'blue'))
+                    logging.debug(f'Input: {input_} ({i}); Op: {op} ({node_ops[i]}; stride = {stride}); output: {output}')
+
+                    outputs.append(output)
 
         return COMBINATION_METHODS[combination_method]()(outputs)
 
@@ -140,7 +143,7 @@ class Block:
         unused_outputs = set()
         for i in range(self.n_nodes):
             with tf.variable_scope(f'node_{i}'):
-                logging.debug(f'\tnode_{i}')
+                logging.debug(colored(f"\tnode_{i}", 'blue'))
                 output = self._build_node(inputs, unused_outputs, node_idx=i)
             inputs.append(output)
             unused_outputs.add(output)
@@ -192,11 +195,12 @@ class Block:
                         old_op_idx = op_idx[input_i]
                         new_op_idx = np.random.choice(conv_op_idx)
 
-                        if self.stride == 1 or input_idx[op_i] not in [0, 1]:
-                            while new_op_idx == old_op_idx:
-                                new_op_idx = np.random.choice(conv_op_idx)
-                        else: # make sure the op can be strided; can't use Id
+                        if self.stride > 1 and input_idx[op_i] not in [0, 1]:
+                            # make sure the op can be strided; can't use Id
                             while new_op_idx == old_op_idx or new_op_idx == len(CONV_OPS) - 1: # Id is last conv op
+                                new_op_idx = np.random.choice(conv_op_idx)
+                        else:
+                            while new_op_idx == old_op_idx:
                                 new_op_idx = np.random.choice(conv_op_idx)
 
                         op_idx[input_i] = new_op_idx
@@ -314,6 +318,10 @@ class Architecture:
         # this might not be necessary but seems sufficient
         kwargs = locals()
         kwargs.pop('self')
+
+        # from multiprocessing.pool import ThreadPool
+        # predictions = ThreadPool(processes=1).apply_async(self._train(), kwargs)
+
         thread = Thread(target=self._train, kwargs=kwargs)
         thread.start()
         thread.join()
@@ -346,6 +354,7 @@ class Architecture:
 
         sess.close()
         self._trained_at = time()
+        # return predictions
 
     def _build(self):
         with tf.variable_scope('input'):
@@ -361,10 +370,10 @@ class Architecture:
         last_block_input = input_
         for repeat_idx in range(self.n_block_repeats):
             with tf.variable_scope(f'repeat_{repeat_idx}'):
-                logging.debug(f'building repeat {repeat_idx}')
+                logging.debug(colored(f'building repeat {repeat_idx}', 'blue'))
                 for block_idx in range(self.n_blocks_between_reduce):
                     with tf.variable_scope(f'block_{block_idx}'):
-                        logging.debug(f'building block {block_idx}')
+                        logging.debug(colored(f'building block {block_idx}', 'blue'))
                         block_output = self.block(inputs, input_conv_1x1)
                     inputs = [last_block_input, block_output]
                     last_block_input = block_output
@@ -372,7 +381,7 @@ class Architecture:
                 # don't add a reduction block just before the output layer
                 if repeat_idx != self.n_block_repeats - 1:
                     with tf.variable_scope(f'reduce'):
-                        logging.debug(f'building reduce')
+                        logging.debug(colored(f'building reduce', 'blue'))
                         block_output = self.reduce_block(inputs, input_conv_1x1)
                     inputs = [block_output, block_output]
                     last_block_input = block_output
