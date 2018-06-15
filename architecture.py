@@ -17,16 +17,18 @@ import inspect
 N_FILTERS = 128
 PADDING = 'same'
 ACTIVATION = 'relu'
+# REGULARIZER = None
+REGULARIZER = tf.keras.regularizers.l2(.05)
 
 # technically its 1D, so not 1x1, but I find 1x1 reminds me better what it's doing
-CONV_1x1 = lambda: keras.layers.Conv1D(N_FILTERS, kernel_size=1, padding=PADDING, activation=ACTIVATION)
+CONV_1x1 = lambda: keras.layers.Conv1D(N_FILTERS, kernel_size=1, padding=PADDING, activation=ACTIVATION, kernel_regularizer=REGULARIZER)
 
 # For the reduce block, we'll just set the stride of the operations used on the inputs to 2,
 # so each "op" here is actually a function that returns the desired layer
 CONV_OPS = [
-    lambda s: keras.layers.Conv1D(N_FILTERS, kernel_size=3, strides=s, padding=PADDING, activation=ACTIVATION),
-    lambda s: keras.layers.Conv1D(N_FILTERS, kernel_size=5, strides=s, padding=PADDING, activation=ACTIVATION),
-    lambda s: keras.layers.Conv1D(N_FILTERS, kernel_size=7, strides=s, padding=PADDING, activation=ACTIVATION),
+    lambda s: keras.layers.Conv1D(N_FILTERS, kernel_size=3, strides=s, padding=PADDING, activation=ACTIVATION, kernel_regularizer=REGULARIZER),
+    lambda s: keras.layers.Conv1D(N_FILTERS, kernel_size=5, strides=s, padding=PADDING, activation=ACTIVATION, kernel_regularizer=REGULARIZER),
+    lambda s: keras.layers.Conv1D(N_FILTERS, kernel_size=7, strides=s, padding=PADDING, activation=ACTIVATION, kernel_regularizer=REGULARIZER),
     lambda s: keras.layers.MaxPool1D(strides=s, padding='same'),
     lambda s: keras.layers.AvgPool1D(strides=s, padding='same'),
     # Id *must* be the last op; we make sure not to use the last op in the input when reducing
