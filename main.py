@@ -3,7 +3,6 @@ from argparse import ArgumentParser
 from comet_ml import Experiment
 import pickle
 import os
-from tqdm import tqdm
 import numpy as np
 import tensorflow as tf
 from tf_layers.tf_utils import tf_init
@@ -88,7 +87,7 @@ if __name__ == "__main__":
 
     logging.info(f"Training initial population ({args.n_arches} arches).")
 
-    for i in tqdm(range(len(arches))):
+    for i in range(len(arches)):
         arch = arches[i]
         if arch._fitness is None:
             arch.train(splits.train.inputs, splits.train.labels, splits.val.inputs, splits.val.labels,
@@ -97,10 +96,11 @@ if __name__ == "__main__":
                 exp.log_metric('fitness', arch.fitness, step=-i - 1)
             all_trained_arches.append(arch)
             save_arches(all_trained_arches, f'{args.experiment_path}/all_arches.pkl')
+            logging.info(f"Trained initial arch {i}.")
 
     logging.info(f"Finished initial population. Mutating for {args.n_generations} generations.")
 
-    for generation in tqdm(range(args.n_generations)):
+    for generation in range(len(all_trained_arches) - args.n_arches, args.n_generations):
         # select a random sample from the population; mutate the best, remove the oldest or worse
         sample_arches = np.random.choice(arches, size=args.n_sample, replace=False)
         best_arch = max(sample_arches, key=lambda arch: arch.fitness)
