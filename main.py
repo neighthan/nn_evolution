@@ -10,6 +10,7 @@ from nn_evolution.architecture import ArchitectureSampler, WeightsLoader
 from nn_evolution.utils import save_arches, load_arches
 from antibody_design.src.utils import load_seqs, make_splits, encode
 import logging
+import seaborn as sns
 
 
 if __name__ == "__main__":
@@ -29,6 +30,7 @@ if __name__ == "__main__":
     parser.add_argument('-ng', '--n_generations', type=int, required=True)
     parser.add_argument('-p', '--experiment_path', help='Location to save all experiment data.', required=True)
     parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('--notes', help="Notes to add to CometML experiment.")
 
     args = parser.parse_args()
     regularized_evolution = True  # remove oldest arch from sample instead of worst
@@ -45,6 +47,7 @@ if __name__ == "__main__":
         with open(f"{os.environ['HOME']}/.comet_key") as f:
             comet_key = f.read().strip()
         exp = Experiment(comet_key, project_name='evo', log_graph=False, auto_metric_logging=False)
+        exp.log_other('Notes', args.notes)
     except FileNotFoundError:
         exp = None
 
@@ -87,13 +90,23 @@ if __name__ == "__main__":
 
     logging.info(f"Training initial population ({args.n_arches} arches).")
 
+    best_fitness = -np.inf
+
     for i in range(len(arches)):
         arch = arches[i]
         if arch._fitness is None:
             arch.train(splits.train.inputs, splits.train.labels, splits.val.inputs, splits.val.labels,
-                    weights_loader=weights_loader, sess_config=config, epochs=n_train_epochs)
+                       weights_loader=weights_loader, sess_config=config, epochs=n_train_epochs)
             if exp:
-                exp.log_metric('fitness', arch.fitness, step=-i - 1)
+                if arch.fitness > best_fitness:
+                    best_fitness = arch.fitness
+                    # ax = sns.jointplot(preds, labels, s=5, alpha=0.3)
+                    # ax.set_axis_labels('Predicted', 'Actual')
+                    # exp.log_figure('Corr Plot', ax.fig)
+
+                exp.log_metric('fitness', arch.fitness, step=-len(arches) + i)
+                exp.log_metric('best_fitness', best_fitness, step=-len(arches) + i)
+
             all_trained_arches.append(arch)
             save_arches(all_trained_arches, f'{args.experiment_path}/all_arches.pkl')
             logging.info(f"Trained initial arch {i}.")
@@ -119,9 +132,6 @@ if __name__ == "__main__":
         all_trained_arches.append(new_arch)
         save_arches(all_trained_arches, f'{args.experiment_path}/all_arches.pkl')
 
-        if exp:
-            exp.log_metric('fitness', new_arch.fitness, step=generation)
-
         if regularized_evolution:
             worst = max(sample_arches, key=lambda arch: arch.age)
         else:
@@ -130,10 +140,15 @@ if __name__ == "__main__":
         arches.remove(worst)
 
         mean_fitness = sum(m.fitness for m in arches) / len(arches)
-        logging.info(f'Generation {generation}: Removed arch with fitness = {worst.fitness}, '
-                     f'added arch with fitness = {new_arch.fitness} (mean fitness = {mean_fitness}).')
+        logging.info(f'Generation {generation}: Removed arch with fitness = {worst.fitness:.3f}, '
+                     f'added arch with fitness = {new_arch.fitness:.3f} (mean fitness = {mean_fitness:.3f}).')
 
         if exp:
+            if new_arch.fitness > best_fitness:
+                best_fitness = new_arch.fitness
+
+            exp.log_metric('best_fitness', best_fitness, step=generation)
+            exp.log_metric('fitness', new_arch.fitness, step=generation)
             exp.log_metric('mean_fitness', mean_fitness, step=generation)
 
     with open(f'{args.experiment_path}/best_arch.pkl', 'wb') as f:
